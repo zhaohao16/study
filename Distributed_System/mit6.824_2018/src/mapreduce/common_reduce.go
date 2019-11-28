@@ -1,5 +1,12 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	//"io"
+	"log"
+	"os"
+)
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
@@ -44,4 +51,53 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+	decoderList := make([]*json.Decoder, nMap)
+	for i := 0; i < nMap; i++ {
+		filename := reduceName(jobName, i, reduceTask)
+		fd, err := os.OpenFile(filename, os.O_RDONLY, 0666) // For read access.
+		if err != nil {
+			log.Println("[doReduce] os.OpenFile failed, errInfo:", err, "filename:", filename)
+			continue
+		}
+		defer fd.Close()
+		//		log.Println("[doReduce] os.OpenFile success, filename:", filename)
+		decoderList[i] = json.NewDecoder(fd)
+	}
+	tmpMap := make(map[string][]string)
+	for i := 0; i < nMap; i++ {
+		if decoderList[i] == nil {
+			continue
+		}
+		for decoderList[i].More() {
+			var tmp KeyValue
+			err := decoderList[i].Decode(&tmp)
+			if err != nil {
+				log.Println("[doReduce] decoderList[i].Decode(&tmp) failed, errInfo:", err, "i:", i)
+				break
+			}
+			list := tmpMap[tmp.Key]
+			list = append(list, tmp.Value)
+			tmpMap[tmp.Key] = list
+		}
+	}
+
+	var encoder *json.Encoder
+
+	filename := mergeName(jobName, reduceTask)
+	fd, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666) // For read access.
+	if err != nil {
+		log.Println("[doReduce] os.OpenFile failed, errInfo:", err, "filename:", filename)
+		return
+	}
+	defer fd.Close()
+	//	log.Println("[doReduce] os.OpenFile success, filename:", filename)
+	encoder = json.NewEncoder(fd)
+	for key, value := range tmpMap {
+		ans := reduceF(key, value)
+		err := encoder.Encode(KeyValue{key, ans})
+		if err != nil {
+			log.Println("[doReduce] encoder.Encode failed, errInfo:", err, "filename:", filename)
+		}
+
+	}
 }
