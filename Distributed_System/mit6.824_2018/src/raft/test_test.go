@@ -14,35 +14,72 @@ import "time"
 import "math/rand"
 import "sync/atomic"
 import "sync"
+import _ "net/http/pprof"
+import "net/http"
+import "log"
+
+func init1() {
+	go func() {
+		log.Println(http.ListenAndServe(":6824", nil))
+	}()
+}
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
+func showState(cfg *config, flag string) {
+	for i := 0; i < cfg.n; i++ {
+		term, is_leader := cfg.rafts[i].GetStateV2()
+		if false {
+			log.Println("[TestReElection] ", flag, " index:", i, "connected:", cfg.connected[i], term, is_leader)
+		}
+	}
+}
+
+func show(cfg *config, flag string) {
+	for i := 0; i < cfg.n; i++ {
+		term, is_leader := cfg.rafts[i].GetStateV2()
+		if false {
+			cfg.mu.Lock()
+			if cfg.rafts[i] != nil {
+				log.Println("[TestReElection] ", flag, " index:", i, "connected:", cfg.connected[i], term, is_leader, "logs:", cfg.logs[i], "newlogs:", cfg.rafts[i].logs)
+			} else {
+				log.Println("[TestReElection] ", flag, " index:", i, "connected:", cfg.connected[i], term, is_leader, "logs:", cfg.logs[i])
+			}
+			cfg.mu.Unlock()
+		}
+	}
+
+}
+
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
-
+	defer showState(cfg, "eeeeee")
 	cfg.begin("Test (2A): initial election")
-
+	showState(cfg, "111111")
 	// is a leader elected?
 	cfg.checkOneLeader()
-
+	showState(cfg, "22222")
 	// sleep a bit to avoid racing with followers learning of the
 	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
+	showState(cfg, "33333")
 	term1 := cfg.checkTerms()
-
+	showState(cfg, "44444")
 	// does the leader+term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
+	showState(cfg, "55555")
 	term2 := cfg.checkTerms()
 	if term1 != term2 {
 		fmt.Printf("warning: term changed even though there were no failures")
 	}
-
+	showState(cfg, "66666")
 	// there should still be a leader.
 	cfg.checkOneLeader()
+	showState(cfg, "77777")
 
 	cfg.end()
 }
@@ -51,35 +88,36 @@ func TestReElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
-
+	defer showState(cfg, "eeeeee")
 	cfg.begin("Test (2A): election after network failure")
-
+	showState(cfg, "111111")
 	leader1 := cfg.checkOneLeader()
-
+	showState(cfg, "222222")
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
-
+	showState(cfg, "33333")
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
-
+	showState(cfg, "44444")
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
+	showState(cfg, "55555")
 	cfg.checkNoLeader()
-
+	showState(cfg, "6666")
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
-
+	showState(cfg, "77777")
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
-
+	showState(cfg, "88888")
 	cfg.end()
 }
 
@@ -89,14 +127,13 @@ func TestBasicAgree2B(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2B): basic agreement")
-
+	//show(cfg, "111")
 	iters := 3
 	for index := 1; index < iters+1; index++ {
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
-
 		xindex := cfg.one(index*100, servers, false)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
@@ -110,22 +147,26 @@ func TestFailAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
-
+	defer show(cfg, "eee")
 	cfg.begin("Test (2B): agreement despite follower disconnection")
 
 	cfg.one(101, servers, false)
-
+	show(cfg, "1111")
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-
+	show(cfg, "222")
 	// agree despite one disconnected server?
 	cfg.one(102, servers-1, false)
+	show(cfg, "333")
 	cfg.one(103, servers-1, false)
+	show(cfg, "444")
 	time.Sleep(RaftElectionTimeout)
+	show(cfg, "555")
 	cfg.one(104, servers-1, false)
+	show(cfg, "666")
 	cfg.one(105, servers-1, false)
-
+	show(cfg, "777")
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 
@@ -293,37 +334,40 @@ func TestRejoin2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
-
+	defer show(cfg, "eeee")
 	cfg.begin("Test (2B): rejoin of partitioned leader")
-
+	show(cfg, "1111")
 	cfg.one(101, servers, true)
-
+	show(cfg, "2222")
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
+	show(cfg, "3333")
 	cfg.disconnect(leader1)
-
+	show(cfg, "4444")
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
+	show(cfg, "5555")
 	cfg.rafts[leader1].Start(103)
+	show(cfg, "6666")
 	cfg.rafts[leader1].Start(104)
-
+	show(cfg, "7777")
 	// new leader commits, also for index=2
 	cfg.one(103, 2, true)
-
+	show(cfg, "8888")
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-
+	show(cfg, "9999")
 	// old leader connected again
 	cfg.connect(leader1)
-
+	show(cfg, "1111")
 	cfg.one(104, 2, true)
-
+	show(cfg, "2222")
 	// all together now
 	cfg.connect(leader2)
-
+	show(cfg, "3333")
 	cfg.one(105, servers, true)
-
+	show(cfg, "4444")
 	cfg.end()
 }
 
@@ -331,24 +375,24 @@ func TestBackup2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
-
+	defer show(cfg, "eeee")
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
-
+	show(cfg, "1111")
 	cfg.one(rand.Int(), servers, true)
-
+	show(cfg, "2222")
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
-
+	show(cfg, "3333")
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
-
+	show(cfg, "4444")
 	time.Sleep(RaftElectionTimeout / 2)
-
+	show(cfg, "5555")
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
 
@@ -356,12 +400,12 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
-
+	show(cfg, "6666")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
-
+	show(cfg, "7777")
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
 	other := (leader1 + 2) % servers
@@ -369,14 +413,14 @@ func TestBackup2B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
-
+	show(cfg, "8888")
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
-
+	show(cfg, "9999")
 	time.Sleep(RaftElectionTimeout / 2)
-
+	show(cfg, "1111")
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
@@ -384,18 +428,18 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
-
+	show(cfg, "2222")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
-
+	show(cfg, "3333")
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
 	cfg.one(rand.Int(), servers, true)
-
+	show(cfg, "4444")
 	cfg.end()
 }
 
@@ -515,43 +559,49 @@ func TestPersist12C(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2C): basic persistence")
-
+	show(cfg, "1111")
 	cfg.one(11, servers, true)
-
+	show(cfg, "2222")
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
 		cfg.start1(i)
 	}
+	show(cfg, "3333")
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 		cfg.connect(i)
 	}
-
+	show(cfg, "4444")
 	cfg.one(12, servers, true)
-
+	show(cfg, "5555")
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
+	show(cfg, "6666")
 	cfg.start1(leader1)
 	cfg.connect(leader1)
-
+	show(cfg, "7777")
 	cfg.one(13, servers, true)
-
+	show(cfg, "8888")
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
+	show(cfg, "9999")
 	cfg.one(14, servers-1, true)
+	show(cfg, "1111")
 	cfg.start1(leader2)
+	show(cfg, "2222")
 	cfg.connect(leader2)
 
 	cfg.wait(4, servers, -1) // wait for leader2 to join before killing i3
-
+	show(cfg, "3333")
 	i3 := (cfg.checkOneLeader() + 1) % servers
 	cfg.disconnect(i3)
 	cfg.one(15, servers-1, true)
+	show(cfg, "4444")
 	cfg.start1(i3)
 	cfg.connect(i3)
-
+	show(cfg, "5555")
 	cfg.one(16, servers, true)
-
+	show(cfg, "6666")
 	cfg.end()
 }
 
@@ -645,14 +695,16 @@ func TestFigure82C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
+	defer show(cfg, "eeee---")
 
 	cfg.begin("Test (2C): Figure 8")
-
+	show(cfg, "TestFigure82C 1111---")
 	cfg.one(rand.Int(), 1, true)
-
+	show(cfg, "TestFigure82C 2222---")
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
+		show(cfg, fmt.Sprintf("TestFigure82C 3333----%v", iters))
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
 				_, _, ok := cfg.rafts[i].Start(rand.Int())
@@ -661,7 +713,7 @@ func TestFigure82C(t *testing.T) {
 				}
 			}
 		}
-
+		show(cfg, fmt.Sprintf("TestFigure82C 4444----%v", iters))
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
@@ -669,31 +721,34 @@ func TestFigure82C(t *testing.T) {
 			ms := (rand.Int63() % 13)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
-
+		show(cfg, fmt.Sprintf("TestFigure82C 5555----%v", iters))
 		if leader != -1 {
 			cfg.crash1(leader)
 			nup -= 1
 		}
-
+		show(cfg, fmt.Sprintf("TestFigure82C 6666----%v", iters))
 		if nup < 3 {
+			show(cfg, fmt.Sprintf("TestFigure82C @@@@----%v", iters))
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
 				cfg.start1(s)
 				cfg.connect(s)
 				nup += 1
 			}
+			show(cfg, fmt.Sprintf("TestFigure82C ====----%v", iters))
 		}
+		show(cfg, fmt.Sprintf("TestFigure82C 7777----%v", iters))
 	}
-
+	show(cfg, "TestFigure82C 8888---")
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i)
 			cfg.connect(i)
 		}
 	}
-
+	show(cfg, "TestFigure82C 9999---")
 	cfg.one(rand.Int(), servers, true)
-
+	show(cfg, "TestFigure82C 0000---")
 	cfg.end()
 }
 
@@ -730,11 +785,11 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true)
 	defer cfg.cleanup()
-
+	defer show(cfg, "eeee---")
 	cfg.begin("Test (2C): Figure 8 (unreliable)")
-
+	show(cfg, "1111---")
 	cfg.one(rand.Int()%10000, 1, true)
-
+	show(cfg, "2222----")
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		if iters == 200 {
@@ -747,7 +802,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				leader = i
 			}
 		}
-
+		show(cfg, fmt.Sprintf("3333----%v", iters))
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
@@ -755,12 +810,12 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			ms := (rand.Int63() % 13)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
-
+		show(cfg, fmt.Sprintf("4444----%v", iters))
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
 			nup -= 1
 		}
-
+		show(cfg, fmt.Sprintf("5555----%v", iters))
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
@@ -768,16 +823,17 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				nup += 1
 			}
 		}
+		show(cfg, fmt.Sprintf("6666----%v", iters))
 	}
-
+	show(cfg, "7777----")
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
 			cfg.connect(i)
 		}
 	}
-
+	show(cfg, "8888----")
 	cfg.one(rand.Int()%10000, servers, true)
-
+	show(cfg, "9999----")
 	cfg.end()
 }
 
