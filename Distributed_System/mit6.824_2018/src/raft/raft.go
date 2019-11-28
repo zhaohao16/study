@@ -53,9 +53,10 @@ type logInfo struct {
 }
 
 const (
-	Follower  int32 = 0
-	Candidate int32 = 1
-	Leader    int32 = 2
+	Follower      int32 = 0
+	Candidate     int32 = 1
+	Leader        int32 = 2
+	heartbeatTime       = 50 * time.Millisecond
 )
 
 //
@@ -375,7 +376,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	electionTime := rand.Intn(150) + 150
 	rf.electiontimeout = time.Duration(electionTime) * time.Millisecond
 	rf.electionTimer = time.NewTimer(rf.electiontimeout)
-	rf.heartbeatTimer = time.NewTimer(100 * time.Millisecond)
+	rf.heartbeatTimer = time.NewTimer(heartbeatTime)
 
 	rf.logs = make([]logInfo, 1)
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -426,7 +427,7 @@ func (rf *Raft) raftLoop() {
 		case Leader:
 			select {
 			case <-rf.heartbeatTimer.C:
-				rf.heartbeatTimer.Reset(100 * time.Millisecond)
+				rf.heartbeatTimer.Reset(heartbeatTime)
 				rf.startAppendLog()
 			case <-timeout.C:
 			case <-rf.shutdown:
@@ -647,7 +648,7 @@ func (rf *Raft) startAppendLog() {
 				var reply AppendLogEntriesRsp
 				ok := rf.sendAppendEntries(index, args, &reply)
 				flag := handlerAppendLogReply(ok, index, &args, &reply, oldNextIndex)
-				if !flag || count > 2 {
+				if !flag || count > 3 || begin.Add(heartbeatTime).After(time.Now()) {
 					waste := time.Since(begin)
 					DPrintln(3, "[startAppendLog] star currentTerm:", rf.currentTerm, "me:", rf.me, "-->", index, "waste:", waste, "ok:", ok, "len:", len(args.Entries))
 					return

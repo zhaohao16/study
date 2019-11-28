@@ -1,5 +1,7 @@
 package raftkv
 
+import "fmt"
+
 const (
 	OK       = "OK"
 	ErrNoKey = "ErrNoKey"
@@ -15,6 +17,12 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ID  int64
+	Seq int64
+}
+
+func (args *PutAppendArgs) String() string {
+	return fmt.Sprintf("key:%v, Value:%v, Op:%v, ID:%v, Seq:%v", args.Key, args.Value, args.Op, args.ID, args.Seq)
 }
 
 type PutAppendReply struct {
