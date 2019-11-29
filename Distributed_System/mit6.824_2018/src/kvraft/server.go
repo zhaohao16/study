@@ -7,11 +7,13 @@ import (
 	"log"
 	"raft"
 	// "sort"
+	"bytes"
+	"strconv"
 	"sync"
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -37,7 +39,7 @@ type Op struct {
 }
 
 func (op *Op) String() string {
-	return fmt.Sprintf("key:%v, Value:%v, Op:%v, ID:%v, Seq:%v, Begin:%v", op.Key, op.Value, op.Op, op.ID, op.Seq, time.Unix(0, op.Begin))
+	return fmt.Sprintf("key:%v, Value:%v, Op:%v, ID:%v, Seq:%v, Begin:%v, beginTme:%v", op.Key, op.Value, op.Op, op.ID, op.Seq, op.Begin, time.Unix(0, op.Begin))
 }
 
 type KVServer struct {
@@ -67,11 +69,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// 	return
 	// }
 	op := Op{
-		Key: args.Key,
-		// Value: args.Value,
-		// Op:    args.Op,
-		// ID:    args.ID,
-		// Seq:   args.Seq,
+		Key:   args.Key,
+		Value: strconv.FormatInt(nrand(), 10), //防止重复，get请求在raft日志可能被覆盖
 		Begin: time.Now().UnixNano(),
 	}
 	index, _, isleader := kv.rf.Start(op)
@@ -81,9 +80,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	// DPrintf("[Get] kv.me:%v isleader:%v args:%v index:%v\n", kv.me, isleader, args, index)
 	ch := make(chan Op, 1)
-	kv.mu.Lock()
-	kv.notice[index] = ch
-	kv.mu.Unlock()
+	kv.putNotice(index, ch)
 	select {
 	case cmd := <-ch:
 		if isCover(op, cmd) {
@@ -139,9 +136,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	// DPrintf("[PutAppend] kv.me:%v isleader:%v args:%v index:%v\n", kv.me, isleader, args, index)
 	ch := make(chan Op, 1)
-	kv.mu.Lock()
-	kv.notice[index] = ch
-	kv.mu.Unlock()
+	kv.putNotice(index, ch)
 	select {
 	case cmd := <-ch:
 		if isCover(op, cmd) {
@@ -168,6 +163,12 @@ func (kv *KVServer) Kill() {
 	close(kv.shutdown)
 }
 
+func (kv *KVServer) showDB() string {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return fmt.Sprintf("kv.me:%v data:%v", kv.me, kv.data)
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -189,32 +190,78 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(KVServer)
 	kv.me = me
+	//maxraftstate = 100
 	kv.maxraftstate = maxraftstate
 	kv.persister = persister
 	// You may need initialization code here.
 	kv.shutdown = make(chan struct{})
 	kv.notice = make(map[int]chan Op)
-	kv.applyCh = make(chan raft.ApplyMsg, 100)
+	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.data = make(map[string]string)
 	kv.lastSeq = make(map[int64]int64)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.frequency = make(map[int]int)
+
+	kv.readSnapshot(persister.ReadSnapshot())
 	go kv.loop()
 	// You may need initialization code here.
-	// go kv.frequencyShow()
+	//go kv.frequencyShow()
 	return kv
+}
+func (kv *KVServer) checkDoSnapshot() bool {
+	if kv.maxraftstate <= 0 {
+		return false
+	}
+	raftStateSize := kv.persister.RaftStateSize()
+	if raftStateSize > kv.maxraftstate {
+		return true
+	}
+	return false
+}
+
+func (kv *KVServer) writeSnapshot(index int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	kv.mu.Lock()
+	e.Encode(kv.data)
+	e.Encode(kv.lastSeq)
+	kv.mu.Unlock()
+	go kv.rf.DoSnapshot(index, w.Bytes())
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	// Your code here (2C).
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	d.Decode(&kv.data)
+	d.Decode(&kv.lastSeq)
+}
+
+func (kv *KVServer) putNotice(index int, ch chan Op) {
+	kv.mu.Lock()
+	oldCh, ok := kv.notice[index]
+	if ok { //如果存在旧的删除发送一个错误的
+		oldCh <- Op{}
+	}
+
+	kv.notice[index] = ch
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) loop() {
 	for {
 		select {
 		case m := <-kv.applyCh:
-
 			if m.CommandValid == false {
-				// ignore other types of ApplyMsg
+				kv.mu.Lock()
+				kv.readSnapshot(m.Snapshot)
+				kv.mu.Unlock()
 			} else if v, ok := (m.Command).(Op); ok {
 				waste := time.Since(time.Unix(0, v.Begin))
-				// DPrintf("[loop] kv.me:%v v:%v Waste:%v\n", kv.me, v.String(), waste)
+				DPrintf("[loop] kv.me:%v v:%v Waste:%v m.CommandIndex:%v\n", kv.me, v.String(), waste, m.CommandIndex)
 				kv.mu.Lock()
 				if v.Seq > kv.lastSeq[v.ID] {
 					kv.frequency[int(waste/frequencyTime)]++
@@ -226,12 +273,21 @@ func (kv *KVServer) loop() {
 					}
 					kv.lastSeq[v.ID] = v.Seq
 				}
+				kv.mu.Unlock()
+
+				kv.mu.Lock()
 				ch, ok := kv.notice[m.CommandIndex]
 				if ok {
 					ch <- v
 					delete(kv.notice, m.CommandIndex)
 				}
 				kv.mu.Unlock()
+
+				if kv.checkDoSnapshot() {
+					//	DPrintf("[loop] star writeSnapshot m.CommandIndex:%v\n", m.CommandIndex)
+					kv.writeSnapshot(m.CommandIndex)
+					//	DPrintf("[loop] end writeSnapshot m.CommandIndex:%v\n", m.CommandIndex)
+				}
 			}
 		case <-kv.shutdown:
 			if len(kv.applyCh) == 0 {

@@ -10,6 +10,15 @@ import "log"
 import "strings"
 import "sync"
 import "sync/atomic"
+import "fmt"
+import _ "net/http/pprof"
+import "net/http"
+
+func init1() {
+	go func() {
+		log.Println(http.ListenAndServe(":6824", nil))
+	}()
+}
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -588,6 +597,14 @@ func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
 	GenericTestLinearizability(t, "3A", 15, 7, true, true, true, -1)
 }
 
+func show(cfg *config, str string) {
+	for i := 0; i < len(cfg.kvservers); i++ {
+		if false {
+			log.Println("[show] str:", str, cfg.kvservers[i].showDB()) //, cfg.endnames[i])
+		}
+	}
+}
+
 //
 // if one server falls behind, then rejoins, does it
 // recover by using the InstallSnapshot RPC?
@@ -603,47 +620,67 @@ func TestSnapshotRPC3B(t *testing.T) {
 	ck := cfg.makeClient(cfg.All())
 
 	cfg.begin("Test: InstallSnapshot RPC (3B)")
-
+	show(cfg, "1111111111")
 	Put(cfg, ck, "a", "A")
+	show(cfg, "2222222222")
 	check(cfg, t, ck, "a", "A")
+	show(cfg, "3333333333")
 
+	show(cfg, "4444444__0_1_partition_2")
 	// a bunch of puts into the majority partition.
 	cfg.partition([]int{0, 1}, []int{2})
 	{
+		show(cfg, "4444444__0_1_makeClient_begin")
 		ck1 := cfg.makeClient([]int{0, 1})
+		show(cfg, "4444444__0_1_makeClient_end")
 		for i := 0; i < 50; i++ {
+			show(cfg, fmt.Sprintf("44444444_%v", i))
 			Put(cfg, ck1, strconv.Itoa(i), strconv.Itoa(i))
+			show(cfg, fmt.Sprintf("55555555_%v", i))
 		}
 		time.Sleep(electionTimeout)
+		show(cfg, fmt.Sprintf("777777777"))
 		Put(cfg, ck1, "b", "B")
+		show(cfg, fmt.Sprintf("888888888"))
 	}
-
+	show(cfg, "999999999")
 	// check that the majority partition has thrown away
 	// most of its log entries.
 	if cfg.LogSize() > 2*maxraftstate {
 		t.Fatalf("logs were not trimmed (%v > 2*%v)", cfg.LogSize(), maxraftstate)
 	}
-
+	show(cfg, "@000000000")
 	// now make group that requires participation of
 	// lagging server, so that it has to catch up.
 	cfg.partition([]int{0, 2}, []int{1})
 	{
 		ck1 := cfg.makeClient([]int{0, 2})
+		show(cfg, "@1111111111")
 		Put(cfg, ck1, "c", "C")
+		show(cfg, "@2222222222")
 		Put(cfg, ck1, "d", "D")
+		show(cfg, "@333333333")
 		check(cfg, t, ck1, "a", "A")
+		show(cfg, "@4444444444")
 		check(cfg, t, ck1, "b", "B")
+		show(cfg, "@555555555555")
 		check(cfg, t, ck1, "1", "1")
+		show(cfg, "@6666666666")
 		check(cfg, t, ck1, "49", "49")
+		show(cfg, "@7777777777")
 	}
-
+	show(cfg, "@8888888888")
 	// now everybody
 	cfg.partition([]int{0, 1, 2}, []int{})
-
+	show(cfg, "@9999999999")
 	Put(cfg, ck, "e", "E")
+	show(cfg, "#000000000")
 	check(cfg, t, ck, "c", "C")
+	show(cfg, "#11111111111")
 	check(cfg, t, ck, "e", "E")
+	show(cfg, "#2222222222222")
 	check(cfg, t, ck, "1", "1")
+	show(cfg, "#3333333333333")
 
 	cfg.end()
 }
