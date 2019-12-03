@@ -28,6 +28,95 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (c *Config) copy() Config {
+	config := Config{
+		Num:    c.Num,
+		Shards: c.Shards,
+		Groups: make(map[int][]string),
+	}
+	for k, v := range c.Groups {
+		config.Groups[k] = v
+	}
+	return config
+}
+
+func (c *Config) countShards() map[int][]int {
+	shardsCount := map[int][]int{}
+	for k := range c.Groups {
+		shardsCount[k] = []int{}
+	}
+	for k, v := range c.Shards {
+		if v != 0 {
+			shardsCount[v] = append(shardsCount[v], k)
+		}
+	}
+	return shardsCount
+}
+
+func (c *Config) getMaxIndex(shardsCount map[int][]int) int {
+	minCount := 0
+	minGid := 0
+	for gid, shards := range shardsCount {
+		if minCount < len(shards) {
+			minCount = len(shards)
+			minGid = gid
+		}
+	}
+	return shardsCount[minGid][0]
+}
+
+func (c *Config) getMinGid(shardsCount map[int][]int) int {
+	maxCount := 20
+	maxGid := -1
+	for gid, shards := range shardsCount {
+		if maxCount > len(shards) {
+			maxCount = len(shards)
+			maxGid = gid
+		}
+	}
+	return maxGid
+}
+
+func (c *Config) rebalance(op string, gid int) {
+	num := len(c.Groups)
+	if num == 0 {
+		for i := 0; i < NShards; i++ {
+			c.Shards[i] = 0
+		}
+		return
+	}
+	switch op {
+	case "Move":
+
+	case "Leave":
+		var list []int
+		for i, g := range c.Shards {
+			if gid == g {
+				c.Shards[i] = 0
+				list = append(list, i)
+			}
+		}
+		// fmt.Println("[rebalance] list", list)
+		for i := 0; i < len(list); i++ {
+			c.Shards[list[i]] = c.getMinGid(c.countShards())
+			// DPrintln("[rebalance] 1111 i", i, "list[i]", list[i], c.getMinGid(c.countShards()), "c.countShards()", c.countShards(), "Config", c)
+		}
+	case "Join":
+		if num == 1 {
+			for i := 0; i < NShards; i++ {
+				c.Shards[i] = gid
+			}
+			return
+		}
+		oneShardNum := NShards / num
+		for i := 0; i < oneShardNum; i++ {
+			c.Shards[c.getMaxIndex(c.countShards())] = gid
+		}
+
+	}
+	DPrintln("[rebalance] Config", c)
+}
+
 const (
 	OK = "OK"
 )
@@ -36,6 +125,9 @@ type Err string
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+
+	ID  int64
+	Seq int64
 }
 
 type JoinReply struct {
@@ -45,6 +137,9 @@ type JoinReply struct {
 
 type LeaveArgs struct {
 	GIDs []int
+
+	ID  int64
+	Seq int64
 }
 
 type LeaveReply struct {
@@ -55,6 +150,9 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+
+	ID  int64
+	Seq int64
 }
 
 type MoveReply struct {
