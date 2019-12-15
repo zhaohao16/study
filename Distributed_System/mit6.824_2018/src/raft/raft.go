@@ -602,7 +602,7 @@ func (rf *Raft) startAppendLog() {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if !ok {
-			return false
+			return true
 		}
 		DPrintln(3, "[startAppendLog] 22222 star currentTerm:", rf.currentTerm, "me:", rf.me, "index:", index, "state:", ok, "oldNextIndex:", oldNextIndex, "len:", len(rf.logs),
 			"PrevLogIndex", args.PrevLogIndex, "PrevLogTerm", args.PrevLogTerm, "len(args.Entries):", len(args.Entries), "reply:", reply, "rf.nextIndex[index]:", rf.nextIndex[index])
@@ -680,8 +680,13 @@ func (rf *Raft) startAppendLog() {
 
 				var reply AppendLogEntriesRsp
 				ok := rf.sendAppendEntries(index, args, &reply)
+				if !begin.Add(heartbeatTime).After(time.Now()) {
+					waste := time.Since(begin)
+					DPrintln(3, "[startAppendLog] time out currentTerm:", rf.currentTerm, "me:", rf.me, "-->", index, "waste:", waste, "ok:", ok, "len:", len(args.Entries))
+					return
+				}
 				flag := handlerAppendLogReply(ok, index, &args, &reply, oldNextIndex)
-				if !flag || count > 3 || begin.Add(heartbeatTime).After(time.Now()) {
+				if !flag || count > 3 {
 					waste := time.Since(begin)
 					DPrintln(3, "[startAppendLog] star currentTerm:", rf.currentTerm, "me:", rf.me, "-->", index, "waste:", waste, "ok:", ok, "len:", len(args.Entries))
 					return
