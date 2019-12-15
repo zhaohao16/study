@@ -9,14 +9,27 @@ import "fmt"
 import "sync/atomic"
 import "sync"
 import "math/rand"
+import "log"
 
 const linearizabilityCheckTimeout = 1 * time.Second
 
 func check(t *testing.T, ck *Clerk, key string, value string) {
+	// id := nrand()
+	// log.Println("------------star", "id:", id, "key:", key, "value", value, "key2shard:", key2shard(key))
 	v := ck.Get(key)
+	// log.Println("============end", "id:", id, "key:", key, "value", value, "v", v, "key2shard:", key2shard(key))
 	if v != value {
 		t.Fatalf("Get(%v): expected:\n%v\nreceived:\n%v", key, value, v)
 	}
+}
+
+func showState(cfg *config, flag string) {
+	// for i := 0; i < cfg.n; i++ {
+	// 	term, is_leader := cfg.rafts[i].GetStateV2()
+	if false {
+		log.Println("[showState] ", flag)
+	}
+	// }
 }
 
 //
@@ -29,10 +42,10 @@ func TestStaticShards(t *testing.T) {
 	defer cfg.cleanup()
 
 	ck := cfg.makeClient()
-
+	showState(cfg, "11111111111111111111111111")
 	cfg.join(0)
 	cfg.join(1)
-
+	showState(cfg, "2222222222222222222222222")
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -41,16 +54,17 @@ func TestStaticShards(t *testing.T) {
 		va[i] = randstring(20)
 		ck.Put(ka[i], va[i])
 	}
+	showState(cfg, "333333333333333333333333333")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
+	showState(cfg, "4444444444444444444444444444444")
 	// make sure that the data really is sharded by
 	// shutting down one shard and checking that some
 	// Get()s don't succeed.
 	cfg.ShutdownGroup(1)
 	cfg.checklogs() // forbid snapshots
-
+	showState(cfg, "5555555555555555555555555")
 	ch := make(chan bool)
 	for xi := 0; xi < n; xi++ {
 		ck1 := cfg.makeClient() // only one call allowed per client
@@ -59,7 +73,7 @@ func TestStaticShards(t *testing.T) {
 			check(t, ck1, ka[i], va[i])
 		}(xi)
 	}
-
+	showState(cfg, "666666666666666666666666")
 	// wait a bit, only about half the Gets should succeed.
 	ndone := 0
 	done := false
@@ -72,17 +86,18 @@ func TestStaticShards(t *testing.T) {
 			break
 		}
 	}
-
+	showState(cfg, "777777777777777777777")
 	if ndone != 5 {
 		t.Fatalf("expected 5 completions with one shard dead; got %v\n", ndone)
 	}
 
 	// bring the crashed shard/group back to life.
 	cfg.StartGroup(1)
+	showState(cfg, "8888888888888888888")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
+	showState(cfg, "9999999999999999999999")
 	fmt.Printf("  ... Passed\n")
 }
 
@@ -93,9 +108,9 @@ func TestJoinLeave(t *testing.T) {
 	defer cfg.cleanup()
 
 	ck := cfg.makeClient()
-
+	showState(cfg, "11111111111111111111111111")
 	cfg.join(0)
-
+	showState(cfg, "22222222222222222222222222")
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -104,38 +119,40 @@ func TestJoinLeave(t *testing.T) {
 		va[i] = randstring(5)
 		ck.Put(ka[i], va[i])
 	}
+	showState(cfg, "3333333333333333333333333333")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
+	showState(cfg, "444444444444444444444444444444")
 	cfg.join(1)
-
+	showState(cfg, "55555555555555555555555555555")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(5)
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
-
+	showState(cfg, "6666666666666666666666666666666666")
 	cfg.leave(0)
-
+	showState(cfg, "7777777777777777777777777777777")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(5)
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
-
+	showState(cfg, "88888888888888888888888888888888")
 	// allow time for shards to transfer.
 	time.Sleep(1 * time.Second)
-
+	showState(cfg, "99999999999999999999999999999999")
 	cfg.checklogs()
+	showState(cfg, "00000000000000000000000000000000")
 	cfg.ShutdownGroup(0)
-
+	showState(cfg, "1111111111111111111111111111111111")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
+	showState(cfg, "22222222222222222222222222222222")
 	fmt.Printf("  ... Passed\n")
 }
 

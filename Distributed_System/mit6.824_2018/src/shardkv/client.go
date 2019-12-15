@@ -13,6 +13,18 @@ import "crypto/rand"
 import "math/big"
 import "shardmaster"
 import "time"
+import "sync"
+import _ "net/http/pprof"
+import "net/http"
+import "log"
+import "fmt"
+
+func init() {
+	go func() {
+		port := nrand()%10000 + 10000
+		log.Println(http.ListenAndServe(fmt.Sprintf(":%v", port), nil))
+	}()
+}
 
 //
 // which shard is a key in?
@@ -40,6 +52,9 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	id  int64
+	seq int64
+	mu  sync.Mutex
 }
 
 //
@@ -55,6 +70,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
+	ck.id = nrand()
 	// You'll have to add code here.
 	return ck
 }
@@ -86,7 +102,7 @@ func (ck *Clerk) Get(key string) string {
 				}
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
@@ -104,6 +120,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Value = value
 	args.Op = op
 
+	ck.mu.Lock()
+	ck.seq++
+	seq := ck.seq
+	ck.mu.Unlock()
+	args.ID = ck.id
+	args.Seq = seq
 
 	for {
 		shard := key2shard(key)
@@ -121,7 +143,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				}
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}

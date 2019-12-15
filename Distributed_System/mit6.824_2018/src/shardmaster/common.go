@@ -24,8 +24,8 @@ const NShards = 10
 // Please don't change this.
 type Config struct {
 	Num    int              // config number
-	Shards [NShards]int     // shard -> gid
-	Groups map[int][]string // gid -> servers[]
+	Shards [NShards]int     // shard -> gid		lab4将数据分成固定10个分片（10分片平均分到Groups个组中）
+	Groups map[int][]string // gid -> servers[] 一个组多个副本
 }
 
 func (c *Config) copy() Config {
@@ -114,7 +114,7 @@ func (c *Config) rebalance(op string, gid int) {
 		}
 
 	}
-	DPrintln("[rebalance] Config", c)
+	DPrintln(1, "[rebalance] Config", c)
 }
 
 const (

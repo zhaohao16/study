@@ -1,18 +1,61 @@
 package shardkv
 
-
-// import "shardmaster"
+import "shardmaster"
 import "labrpc"
 import "raft"
 import "sync"
 import "labgob"
+import "time"
+import "log"
+import "bytes"
+import "fmt"
 
+const Debug = 200
 
+func DPrintln(level int, a ...interface{}) (n int, err error) {
+	if level >= Debug {
+		log.Println(a...)
+	}
+	return
+}
+
+func DPrintf(level int, format string, v ...interface{}) (n int, err error) {
+	if level >= Debug {
+		log.Printf(format, v...)
+	}
+	return
+}
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key     string
+	Value   string
+	Op      string
+	ID      int64
+	Seq     int64
+	ShardID []int
+	Version int
+	Result  string
+	Err     Err //string
+}
+
+func (op *Op) String() string {
+	return fmt.Sprintf("key:%v, Value:%v, Op:%v, ID:%v, Seq:%v, ShardID:%v, Err:%v", op.Key, op.Value, op.Op, op.ID, op.Seq, op.ShardID, op.Err)
+}
+
+type Shards struct {
+	Data    map[string]string
+	Version int
+}
+
+type Migration struct {
+	Version int
+	GID     int
+	ShardID []int
+	Data    map[string]string
+	LastSeq map[int64]int64
 }
 
 type ShardKV struct {
@@ -26,15 +69,200 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	persister *raft.Persister
+	mck       *shardmaster.Clerk
+	shutdown  chan struct{}
+	notice    map[int]chan Op
+	data      map[string]string
+	lastSeq   map[int64]int64
+	shareData map[int]Shards //待共享的数据 ShardsID --> ShardsInfo
+	syncData  map[int]int    //待接受的数据 ShardsID --> version
+	config    shardmaster.Config
+	Shards    [shardmaster.NShards]bool //那个分片属于这个组
 }
 
+func (kv *ShardKV) Data(args *DataArgs, reply *DataReply) {
+	DPrintln(2, "[loop] Data begin me:", kv.me, "gid:", kv.gid, "args", *args)
+	kv.mu.Lock()
+	if args.Version >= kv.config.Num {
+		kv.mu.Unlock()
+		reply.Err = "error version"
+		return
+	}
+	kv.mu.Unlock()
+	op := Op{
+		Op: "Data",
+		ID: nrand(), //防止重复，get请求在raft日志可能被覆盖
+	}
+	index, _, isleader := kv.rf.Start(op)
+	if !isleader {
+		reply.WrongLeader = true
+		return
+	}
+	// DPrintf("[Get] kv.me:%v isleader:%v args:%v index:%v\n", kv.me, isleader, args, index)
+	ch := make(chan Op, 1)
+	kv.putNotice(index, ch)
+	select {
+	case cmd := <-ch:
+		if isCover(op, cmd) {
+			reply.WrongLeader = true
+			reply.Err = "data is cover"
+			return
+		}
+	case <-time.After(time.Millisecond * 300):
+		reply.WrongLeader = true
+		reply.Err = "time out"
+		return
+	}
+	reply.Err = OK
+	reply.Data = make(map[string]string)
+	reply.LastSeq = make(map[int64]int64)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	reply.Version = args.Version
+	for _, id := range args.ShardID {
+		shardsInfo, ok := kv.shareData[id]
+		if ok && shardsInfo.Version == args.Version {
+			for k, v := range shardsInfo.Data {
+				reply.Data[k] = v
+			}
+			for k, v := range kv.lastSeq {
+				reply.LastSeq[k] = v
+			}
+		} else {
+			reply.Err = "not found"
+			DPrintln(2, "[loop] Data error me:", kv.me, "gid:", kv.gid, "args", *args, "reply:", *reply)
+			reply.Version = 0
+		}
+	}
+	DPrintln(2, "[loop] Data end me:", kv.me, "gid:", kv.gid, "args", *args, "reply:", *reply)
+}
+
+func (kv *ShardKV) CheckClean(args *CheckCleanArgs, reply *CheckCleanReply) {
+	_, isleader := kv.rf.GetState()
+	if !isleader {
+		reply.WrongLeader = true
+		return
+	}
+	reply.Err = OK
+	reply.Version = args.Version
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if (args.Version+1 < kv.config.Num) || (args.Version+1 == kv.config.Num && kv.Shards[args.ShardID]) {
+		reply.Result = true
+	} else {
+		reply.Result = false
+	}
+
+}
+
+func (kv *ShardKV) checkKey(key string) bool {
+	id := key2shard(key)
+	// kv.mu.Lock()
+	// defer kv.mu.Unlock()
+	return kv.Shards[id]
+}
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
+	// if !kv.checkKey(args.Key) {
+	// 	reply.Err = ErrWrongGroup
+	// 	return
+	// }
 	// Your code here.
+	op := Op{
+		Op:  "Get",
+		Key: args.Key,
+		ID:  nrand(), //防止重复，get请求在raft日志可能被覆盖
+	}
+	index, _, isleader := kv.rf.Start(op)
+	if !isleader {
+		reply.WrongLeader = true
+		return
+	}
+	// DPrintf("[Get] kv.me:%v isleader:%v args:%v index:%v\n", kv.me, isleader, args, index)
+	ch := make(chan Op, 1)
+	kv.putNotice(index, ch)
+	select {
+	case cmd := <-ch:
+		if isCover(op, cmd) {
+			reply.WrongLeader = true
+			reply.Err = "data is cover"
+			return
+		}
+		if len(cmd.Err) != 0 {
+			reply.Err = cmd.Err
+		} else {
+			reply.Value = cmd.Result
+			reply.Err = OK
+		}
+
+	case <-time.After(time.Millisecond * 300):
+		reply.WrongLeader = true
+		reply.Err = "time out"
+		return
+	}
+
+	DPrintln(2, "[Get] me:", kv.me, "gid:", kv.gid, "op", op.String(), "args", *args, "reply:", reply)
+
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	// if !kv.checkKey(args.Key) {
+	// 	reply.Err = ErrWrongGroup
+	// 	return
+	// }
+	op := Op{
+		Key:   args.Key,
+		Value: args.Value,
+		Op:    args.Op,
+		ID:    args.ID,
+		Seq:   args.Seq,
+	}
+	index, _, isleader := kv.rf.Start(op)
+	if !isleader {
+		reply.WrongLeader = true
+		return
+	}
+	// DPrintf("[PutAppend] kv.me:%v isleader:%v args:%v index:%v\n", kv.me, isleader, args, index)
+	ch := make(chan Op, 1)
+	kv.putNotice(index, ch)
+	select {
+	case cmd := <-ch:
+		if isCover(op, cmd) {
+			reply.WrongLeader = true
+			reply.Err = "data is cover"
+			return
+		}
+		if len(cmd.Err) != 0 {
+			reply.Err = cmd.Err
+		} else {
+			reply.Err = OK
+		}
+	case <-time.After(time.Millisecond * 300):
+		reply.WrongLeader = true
+		reply.Err = "time out"
+		return
+	}
+	DPrintln(2, "[PutAppend] me:", kv.me, "gid:", kv.gid, "op", op.String(), "args", *args, "reply:", reply)
+}
+
+func isCover(old Op, new Op) bool {
+	if old.Key != new.Key || old.Value != new.Value || old.ID != new.ID || old.Seq != new.Seq || old.Op != new.Op {
+		return true
+	}
+	return false
+}
+
+func (kv *ShardKV) putNotice(index int, ch chan Op) {
+	kv.mu.Lock()
+	oldCh, ok := kv.notice[index]
+	if ok { //如果存在旧的删除发送一个错误的
+		oldCh <- Op{}
+	}
+
+	kv.notice[index] = ch
+	kv.mu.Unlock()
 }
 
 //
@@ -46,8 +274,8 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.shutdown)
 }
-
 
 //
 // servers[] contains the ports of the servers in this group.
@@ -81,22 +309,430 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-
+	labgob.Register(shardmaster.Config{})
+	labgob.Register(Migration{})
 	kv := new(ShardKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.make_end = make_end
 	kv.gid = gid
 	kv.masters = masters
-
+	kv.mck = shardmaster.MakeClerk(masters)
 	// Your initialization code here.
 
 	// Use something like this to talk to the shardmaster:
-	// kv.mck = shardmaster.MakeClerk(kv.masters)
-
+	kv.shutdown = make(chan struct{})
+	kv.notice = make(map[int]chan Op)
+	kv.data = make(map[string]string)
+	kv.lastSeq = make(map[int64]int64)
+	kv.shareData = make(map[int]Shards)
+	kv.syncData = make(map[int]int)
+	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-
+	kv.readSnapshot(persister.ReadSnapshot())
+	DPrintln(2, "[shardkv] ---------------------------------------------------------------------------------------------------me:", me, "gid:", gid, "maxraftstate", maxraftstate)
+	go kv.loop()
+	go kv.updateConfig()
+	go kv.startMigration()
+	go kv.cleanShareData()
 	return kv
+}
+
+func (kv *ShardKV) checkDoSnapshot() bool {
+	if kv.maxraftstate <= 0 {
+		return false
+	}
+	raftStateSize := kv.persister.RaftStateSize()
+	if raftStateSize > kv.maxraftstate {
+		return true
+	}
+	return false
+}
+
+func (kv *ShardKV) writeSnapshot(index int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	kv.mu.Lock()
+	e.Encode(kv.data)
+	e.Encode(kv.lastSeq)
+	e.Encode(kv.shareData)
+	e.Encode(kv.syncData)
+	e.Encode(kv.config)
+	e.Encode(kv.Shards)
+	kv.mu.Unlock()
+	go kv.rf.DoSnapshot(index, w.Bytes())
+}
+
+func (kv *ShardKV) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	// Your code here (2C).
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	d.Decode(&kv.data)
+	d.Decode(&kv.lastSeq)
+	d.Decode(&kv.shareData)
+	d.Decode(&kv.syncData)
+	d.Decode(&kv.config)
+	d.Decode(&kv.Shards)
+}
+
+func (kv *ShardKV) loop() {
+	for {
+		select {
+		case m := <-kv.applyCh:
+			id := nrand()
+			begin := time.Now()
+			DPrintf(23, "[loop] applyCh begin me: %v gid:%v id:%v m.Command.(type):%T\n", kv.me, kv.gid, id, m.Command)
+			if m.CommandValid == false {
+				kv.mu.Lock()
+				kv.readSnapshot(m.Snapshot)
+				kv.mu.Unlock()
+				DPrintf(23, "[loop] applyCh end me: %v gid:%v id:%v m.Command.(type):%T waste:%v\n", kv.me, kv.gid, id, m.Command, time.Since(begin))
+				//continue
+			}
+			if v, ok := m.Command.(Migration); ok {
+				kv.mu.Lock()
+				// DPrintln(3, "[loop] Migration begin me:", kv.me, "gid:", kv.gid, "kv.syncData", kv.syncData, "Migration", v)
+				kv.handleMigration(v)
+				// DPrintln(3, "[loop] Migration end me:", kv.me, "gid:", kv.gid, "kv.syncData", kv.syncData, "Migration", v)
+				kv.mu.Unlock()
+				DPrintf(23, "[loop] applyCh end me: %v gid:%v id:%v m.Command.(type):%T waste:%v\n", kv.me, kv.gid, id, m.Command, time.Since(begin))
+				//continue
+			}
+			if v, ok := (m.Command).(shardmaster.Config); ok {
+				kv.mu.Lock()
+				// DPrintln(3, "[loop] Config begin me:", kv.me, "gid:", kv.gid, "old:", kv.config, "new", v, "syncData:", kv.syncData)
+				kv.handleUpdateConfig(v)
+				// DPrintln(3, "[loop] Config end me:", kv.me, "gid:", kv.gid, "old:", kv.config, "new", v, "syncData:", kv.syncData)
+				kv.mu.Unlock()
+				DPrintf(23, "[loop] applyCh end me: %v gid:%v id:%v m.Command.(type):%T waste:%v\n", kv.me, kv.gid, id, m.Command, time.Since(begin))
+				//continue
+			}
+			if v, ok := (m.Command).(Op); ok {
+				kv.mu.Lock()
+				// DPrintln(2, "[loop] Op begin me:", kv.me, "gid:", kv.gid, "op:", v.String(), "data:", kv.data, "config:", kv.config, "kv.checkKey(v.Key):", kv.checkKey(v.Key))
+				if v.Op == "CheckClean" {
+					//kv.handleClean(&v)
+				} else {
+					if !kv.checkKey(v.Key) {
+						v.Err = ErrWrongGroup
+					} else if v.Op == "Get" {
+						val, ok := kv.data[v.Key]
+						if ok {
+							v.Result = val
+						} else {
+							v.Err = ErrNoKey
+						}
+					} else if v.Seq > kv.lastSeq[v.ID] {
+						switch v.Op {
+						case "Put":
+							kv.data[v.Key] = v.Value
+						case "Append":
+							kv.data[v.Key] += v.Value
+						}
+						kv.lastSeq[v.ID] = v.Seq
+					}
+				}
+				// kv.mu.Unlock()
+
+				// kv.mu.Lock()
+				ch, ok := kv.notice[m.CommandIndex]
+				if ok {
+					ch <- v
+					delete(kv.notice, m.CommandIndex)
+				}
+				// DPrintln(2, "[loop] Op end me:", kv.me, "gid:", kv.gid, "op:", v.String(), "data:", kv.data, "config:", kv.config, "kv.checkKey(v.Key):", kv.checkKey(v.Key))
+				kv.mu.Unlock()
+			}
+			DPrintf(2, "[loop] applyCh end me: %v gid:%v id:%v m.Command.(type):%T waste:%v\n", kv.me, kv.gid, id, m.Command, time.Since(begin))
+			if kv.checkDoSnapshot() {
+				id := nrand()
+				DPrintf(3, "[loop] star writeSnapshot id:%v m.CommandIndex:%v kv.persister.RaftStateSize():%v\n", id, m.CommandIndex, kv.persister.RaftStateSize())
+				kv.writeSnapshot(m.CommandIndex)
+				DPrintf(3, "[loop] end writeSnapshot id:%v m.CommandIndex:%v kv.persister.RaftStateSize():%v\n", id, m.CommandIndex, kv.persister.RaftStateSize())
+			}
+		case <-kv.shutdown:
+			return
+		}
+	}
+}
+
+func (kv *ShardKV) updateConfig() {
+	update := func() {
+		_, isleader := kv.rf.GetState()
+		if !isleader {
+			return
+		}
+		nextVerion := kv.config.Num + 1
+		config := kv.mck.Query(nextVerion)
+
+		kv.mu.Lock()
+		if len(kv.syncData) != 0 { //还有未同步的数据
+			kv.mu.Unlock()
+			return
+		}
+		kv.mu.Unlock()
+
+		if config.Num != nextVerion { //不是下一个
+			return
+		}
+		DPrintln(2, "[updateConfig] change config, me:", kv.me, "gid:", kv.gid, "old:", kv.config, "new:", config)
+
+		kv.rf.Start(config)
+	}
+	for {
+
+		select {
+		case <-kv.shutdown:
+			return
+		case <-time.After(time.Millisecond * 100):
+			update()
+		}
+	}
+}
+
+func (kv *ShardKV) cleanShareData() {
+	gc := func(queene chan interface{}) {
+		defer func() {
+			queene <- new(interface{})
+		}()
+		shareData := make(map[int]int) // ShardID-->version
+		kv.mu.Lock()
+		for shardID, shardsInfo := range kv.shareData {
+			shareData[shardID] = shardsInfo.Version
+		}
+		kv.mu.Unlock()
+		if len(shareData) == 0 {
+			return
+		}
+		DPrintln(2, "[cleanShareData] 11111111111111, me:", kv.me, "gid:", kv.gid, "shareData:", shareData)
+		handleReply := func(shardID int, version int) {
+			kv.mu.Lock()
+			defer kv.mu.Unlock()
+			shardsInfo, ok := kv.shareData[shardID]
+			if ok && shardsInfo.Version == version {
+				delete(kv.shareData, shardID)
+				DPrintln(2, "[cleanShareData] 2222222222222222, me:", kv.me, "gid:", kv.gid, "shardID:", shardID, "version:", version)
+			}
+		}
+		var wg sync.WaitGroup
+		for shardID, version := range shareData {
+			wg.Add(1)
+			go func(shardID int, version int) {
+				defer wg.Done()
+				config := kv.mck.Query(version + 1)
+				gid := config.Shards[shardID]
+				args := &CheckCleanArgs{
+					Version: version,
+					ShardID: shardID,
+				}
+				if servers, ok := config.Groups[gid]; ok {
+					// try each server for the shard.
+					for si := 0; si < len(servers); si++ {
+						srv := kv.make_end(servers[si])
+						var reply CheckCleanReply
+						ok := srv.Call("ShardKV.CheckClean", args, &reply)
+						DPrintln(2, "[cleanShareData] 33333333333333, me:", kv.me, "gid:", kv.gid, "--->", gid, "args:", *args, "reply:", reply)
+						if ok && reply.WrongLeader == false && reply.Err == OK && reply.Result {
+							// if  {
+							handleReply(shardID, version)
+							break
+							// }
+						}
+
+					}
+				}
+			}(shardID, version)
+		}
+		wg.Wait()
+	}
+
+	maxCount := 10
+	queene := make(chan interface{}, maxCount)
+	for i := 0; i < maxCount; i++ {
+		queene <- new(interface{})
+	}
+	for {
+		select {
+		case <-kv.shutdown:
+			return
+		case <-time.After(time.Millisecond * 100):
+			<-queene
+			go gc(queene)
+		}
+	}
+}
+
+func (kv *ShardKV) startMigration() {
+	migration := func(queene chan interface{}) {
+		defer func() {
+			queene <- new(interface{})
+		}()
+		_, isleader := kv.rf.GetState()
+		if !isleader {
+			return
+		}
+		kv.mu.Lock()
+		if len(kv.syncData) == 0 {
+			kv.mu.Unlock()
+			return
+		}
+		version := kv.config.Num - 1
+		kv.mu.Unlock()
+
+		config := kv.mck.Query(version)
+		argsMap := make(map[int]*DataArgs) //gid-->DataArgs
+
+		kv.mu.Lock()
+		for ShardsID, version := range kv.syncData {
+			if version != kv.config.Num-1 {
+				continue
+			}
+			gid := config.Shards[ShardsID]
+			args, ok := argsMap[gid]
+			if !ok {
+				args = &DataArgs{
+					Version: kv.config.Num - 1,
+				}
+			}
+			args.ShardID = append(args.ShardID, ShardsID)
+			argsMap[gid] = args
+		}
+		kv.mu.Unlock()
+
+		DPrintln(2, "[loop] startMigration me:", kv.me, "gid:", kv.gid, "syncData", kv.syncData, "args", argsMap)
+		handleReply := func(gid int, reply DataReply) {
+			// kv.mu.Lock()
+			// if reply.Version != kv.config.Num-1 || len(kv.syncData) == 0 {
+			// 	kv.mu.Unlock()
+			// 	return
+			// }
+			// kv.mu.Unlock()
+
+			m := Migration{
+				Version: reply.Version,
+				GID:     gid,
+				ShardID: argsMap[gid].ShardID,
+				Data:    make(map[string]string),
+				LastSeq: make(map[int64]int64),
+			}
+
+			for k, v := range reply.Data {
+				m.Data[k] = v
+			}
+			for k, v := range reply.LastSeq {
+				m.LastSeq[k] = v
+			}
+			// for _, shardID := range argsMap[gid].ShardID {
+			// 	delete(kv.syncData, shardID)
+			// 	kv.Shards[shardID] = true
+			// }
+			kv.rf.Start(m)
+		}
+		var wg sync.WaitGroup
+		for gid, args := range argsMap {
+			DPrintln(3, "[loop] startMigration me:", kv.me, "gid:", kv.gid, "gid", gid, "args:", *args)
+			wg.Add(1)
+			go func(gid int, args *DataArgs) {
+				defer wg.Done()
+				if servers, ok := config.Groups[gid]; ok {
+					// try each server for the shard.
+					for si := 0; si < len(servers); si++ {
+						srv := kv.make_end(servers[si])
+						var reply DataReply
+						ok := srv.Call("ShardKV.Data", args, &reply)
+						if ok && reply.WrongLeader == false && reply.Err == OK {
+							//return reply, OK
+							handleReply(gid, reply)
+						}
+						if ok && (reply.Err == ErrWrongGroup) {
+							//return reply, ErrWrongGroup
+						}
+					}
+				}
+			}(gid, args)
+		}
+		wg.Wait()
+	}
+	maxCount := 10
+	queene := make(chan interface{}, maxCount)
+	for i := 0; i < maxCount; i++ {
+		queene <- new(interface{})
+	}
+
+	for {
+		select {
+		case <-kv.shutdown:
+			return
+		case <-time.After(time.Millisecond * 100):
+			<-queene
+			go migration(queene)
+
+		}
+	}
+}
+
+// func (kv *ShardKV) handleClean(op *Op) {
+
+// }
+
+func (kv *ShardKV) handleMigration(m Migration) {
+	if m.Version != kv.config.Num-1 || len(kv.syncData) == 0 {
+		return
+	}
+	// for _, shardID := range m.ShardID {
+	// 	if kv.syncData[shardID] != m.Version {
+	// 		return
+	// 	}
+	// }
+
+	for k, v := range m.Data {
+		kv.data[k] = v
+	}
+	for k, v := range m.LastSeq {
+		if kv.lastSeq[k] < v {
+			kv.lastSeq[k] = v
+		}
+	}
+	for _, shardID := range m.ShardID {
+		delete(kv.syncData, shardID)
+		kv.Shards[shardID] = true
+	}
+}
+
+func (kv *ShardKV) handleUpdateConfig(config shardmaster.Config) {
+	if kv.config.Num != config.Num-1 {
+		return
+	}
+	for i := 0; i < shardmaster.NShards; i++ {
+		kv.Shards[i] = false
+		if kv.config.Shards[i] == kv.gid {
+			if config.Shards[i] == kv.gid {
+				kv.Shards[i] = true
+			} else { //带共享
+				var shareData Shards
+				shareData.Data = make(map[string]string)
+				shareData.Version = kv.config.Num
+				for k, v := range kv.data {
+					if key2shard(k) == i {
+						shareData.Data[k] = v
+						delete(kv.data, k)
+					}
+				}
+				kv.shareData[i] = shareData
+				DPrintln(3, "[loop] handleUpdateConfig me:", kv.me, "gid:", kv.gid, "ShardsID:", i, "verion:", shareData.Version, "data:", shareData.Data)
+			}
+		} else if config.Shards[i] == kv.gid { //待接受
+			if config.Num > 1 {
+				kv.syncData[i] = config.Num - 1
+			} else {
+				kv.Shards[i] = true
+			}
+		}
+	}
+	DPrintln(3, "[loop] handleUpdateConfig me:", kv.me, "gid:", kv.gid, "kv.syncData", kv.syncData, "kv.Shards:", kv.Shards, "kv.data:", kv.data)
+	kv.config = config
 }

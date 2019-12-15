@@ -26,6 +26,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ID  int64
+	Seq int64
 }
 
 type PutAppendReply struct {
@@ -42,4 +44,30 @@ type GetReply struct {
 	WrongLeader bool
 	Err         Err
 	Value       string
+}
+
+type DataArgs struct {
+	Version int
+	ShardID []int
+	// You'll have to add definitions here.
+}
+
+type DataReply struct {
+	WrongLeader bool
+	Err         Err
+	Version     int
+	Data        map[string]string
+	LastSeq     map[int64]int64
+}
+
+type CheckCleanArgs struct {
+	Version int
+	ShardID int
+}
+
+type CheckCleanReply struct {
+	WrongLeader bool
+	Result      bool
+	Err         Err
+	Version     int
 }

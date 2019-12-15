@@ -6,11 +6,12 @@ import "sync"
 import "labgob"
 import "time"
 import "log"
+import "fmt"
 
-const Debug = 0
+const Debug = 100
 
-func DPrintln(a ...interface{}) (n int, err error) {
-	if Debug > 0 {
+func DPrintln(level int, a ...interface{}) (n int, err error) {
+	if level >= Debug {
 		log.Println(a...)
 	}
 	return
@@ -32,84 +33,107 @@ type ShardMaster struct {
 
 type Op struct {
 	// Your data here.
-	Op   string
-	Args interface{}
-	Seq  int64
-	ID   int64
+	Op    string
+	Args  interface{}
+	Seq   int64
+	ID    int64
+	Begin int64
+}
+
+func (op *Op) String() string {
+	return fmt.Sprintf("Op:%v, Args:%v, ID:%v, Seq:%v, Begin:%v, BeginTime:%v", op.Op, op.Args, op.ID, op.Seq, op.Begin, time.Unix(0, op.Begin))
 }
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
 	op := Op{
-		Op:   "Join",
-		Args: *args,
-		Seq:  args.Seq,
-		ID:   args.ID,
+		Op:    "Join",
+		Args:  *args,
+		Seq:   args.Seq,
+		ID:    args.ID,
+		Begin: time.Now().UnixNano(),
 	}
 	reply.WrongLeader, _ = sm.sendOp(op)
-	DPrintln("[Join] me:", sm.me, "args:", *args, "reply:", reply)
+	DPrintln(1, "[Join] me:", sm.me, "args:", *args, "reply:", reply)
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
 	op := Op{
-		Op:   "Leave",
-		Args: *args,
-		Seq:  args.Seq,
-		ID:   args.ID,
+		Op:    "Leave",
+		Args:  *args,
+		Seq:   args.Seq,
+		ID:    args.ID,
+		Begin: time.Now().UnixNano(),
 	}
 	reply.WrongLeader, _ = sm.sendOp(op)
-	DPrintln("[Leave] me:", sm.me, "args:", *args, "reply:", reply)
+	DPrintln(1, "[Leave] me:", sm.me, "args:", *args, "reply:", reply)
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
 	op := Op{
-		Op:   "Move",
-		Args: *args,
-		Seq:  args.Seq,
-		ID:   args.ID,
+		Op:    "Move",
+		Args:  *args,
+		Seq:   args.Seq,
+		ID:    args.ID,
+		Begin: time.Now().UnixNano(),
 	}
 	reply.WrongLeader, _ = sm.sendOp(op)
-	DPrintln("[Move] me:", sm.me, "args:", *args, "reply:", reply)
+	DPrintln(1, "[Move] me:", sm.me, "args:", *args, "reply:", reply)
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
 	op := Op{
-		Op:   "Query",
-		Args: *args,
-		ID:   nrand(),
+		Op:    "Query",
+		Args:  *args,
+		ID:    nrand(),
+		Begin: time.Now().UnixNano(),
 	}
 	reply.WrongLeader, reply.Config = sm.sendOp(op)
-	DPrintln("[Query] me:", sm.me, "args:", *args, "reply:", reply)
+	if reply.WrongLeader {
+		return
+	}
+	// sm.mu.Lock()
+	// defer sm.mu.Unlock()
+	// last := len(sm.configs) - 1
+	// if args.Num == -1 || args.Num > last {
+	// 	args.Num = last
+	// }
+	// reply.Config = sm.configs[args.Num].copy()
+
+	DPrintln(1, "[Query] me:", sm.me, "args:", *args, "reply:", reply)
 }
 
-func (sm *ShardMaster) sendOp(op Op) (fail bool, config Config) {
+func (sm *ShardMaster) sendOp(op Op) (fail bool, conf Config) {
 	// Your code here.
 	index, _, isleader := sm.rf.Start(op)
 	if !isleader {
-		return true, config
+		return true, conf
 	}
-	ch := make(chan Op)
+	ch := make(chan Op, 1)
 	sm.putNotice(index, ch)
+	DPrintln(1, "[sendOp] putNotice me:", sm.me, "op", op.String(), "index:", index)
 	select {
 	case cmd := <-ch:
+		DPrintln(1, "[sendOp] me:", sm.me, "isCover(op, cmd)", isCover(op, cmd), "op:", op.String(), "cmd:", cmd.String())
 		if isCover(op, cmd) {
-			return true, config
+			return true, conf
 		}
 		if op.Op == "Query" {
 			var ok bool
-			config, ok = cmd.Args.(Config)
+			conf, ok = cmd.Args.(Config)
 			if !ok {
-				return true, config
+				return true, conf
 			}
 		}
-	case <-time.After(time.Millisecond * 300):
-		return true, config
+	case <-time.After(time.Millisecond * 1000):
+		DPrintln(1, "[sendOp] me:", sm.me, "time out")
+		return true, conf
 	}
 
-	return false, config
+	return false, conf
 }
 
 func isCover(old Op, new Op) bool {
@@ -121,12 +145,13 @@ func isCover(old Op, new Op) bool {
 
 func (sm *ShardMaster) putNotice(index int, ch chan Op) {
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	oldCh, ok := sm.notice[index]
 	if ok { //如果存在旧的删除发送一个错误的
+		DPrintln(1, "[putNotice] Repeated me:", sm.me, "index", index)
 		oldCh <- Op{}
 	}
 	sm.notice[index] = ch
-	sm.mu.Unlock()
 }
 
 //
@@ -182,15 +207,26 @@ func (sm *ShardMaster) loop() {
 		case m := <-sm.applyCh:
 			if m.CommandValid == false {
 			} else if v, ok := (m.Command).(Op); ok {
+				id := nrand()
+				DPrintln(2, "[loop] begin me:", sm.me, "m.CommandIndex:", m.CommandIndex, "id", id, "v:", v.String())
 				sm.mu.Lock()
 				if v.Op == "Query" {
-					sm.handleOp(v, m.CommandIndex)
+					sm.handleOp(&v, m.CommandIndex)
 				} else if v.Seq > sm.lastSeq[v.ID] {
-					sm.handleOp(v, m.CommandIndex)
+					sm.handleOp(&v, m.CommandIndex)
 					sm.lastSeq[v.ID] = v.Seq
 				}
+				ch, ok := sm.notice[m.CommandIndex]
+				if ok {
+					DPrintln(2, "[handleOp] send msg begin me:", sm.me, "CommandIndex:", m.CommandIndex, "op:", v.String(), "waste:", time.Since(time.Unix(0, v.Begin)))
+					ch <- v
+					delete(sm.notice, m.CommandIndex)
+					DPrintln(2, "[handleOp] send msg end me:", sm.me, "CommandIndex:", m.CommandIndex, "op:", v.String(), "waste:", time.Since(time.Unix(0, v.Begin)))
+				} else {
+					DPrintln(2, "[handleOp] not found me:", sm.me, "CommandIndex:", m.CommandIndex, "op:", v.String(), "waste:", time.Since(time.Unix(0, v.Begin)))
+				}
 				sm.mu.Unlock()
-				DPrintln("[loop] me:", sm.me, "m.CommandIndex:", m.CommandIndex, "v", v, "sm.configs", sm.configs)
+				DPrintln(2, "[loop] end me:", sm.me, "m.CommandIndex:", m.CommandIndex, "id", id, "v:", v.String(), "waste:", time.Since(time.Unix(0, v.Begin)))
 			}
 
 		case <-sm.shutdown:
@@ -199,18 +235,19 @@ func (sm *ShardMaster) loop() {
 	}
 }
 
-func (sm *ShardMaster) handleOp(op Op, index int) {
+func (sm *ShardMaster) handleOp(op *Op, index int) {
 	last := len(sm.configs) - 1
 	switch op.Op {
 	case "Query":
 		args, ok := op.Args.(QueryArgs)
 		if ok {
+			last := len(sm.configs) - 1
 			if args.Num == -1 || args.Num > last {
 				args.Num = last
 			}
 			op.Args = sm.configs[args.Num].copy()
-			DPrintln("[handleOp] Query, args.Num", args.Num, "op.Args", op.Args)
 		}
+
 	case "Move":
 		args, ok := op.Args.(MoveArgs)
 		if ok {
@@ -245,9 +282,5 @@ func (sm *ShardMaster) handleOp(op Op, index int) {
 			sm.configs = append(sm.configs, newConfig)
 		}
 	}
-	ch, ok := sm.notice[index]
-	if ok {
-		ch <- op
-		delete(sm.notice, index)
-	}
+
 }
