@@ -594,7 +594,7 @@ func (rf *Raft) resetElectionTime() {
 }
 
 func (rf *Raft) startAppendLog() {
-	var wg sync.WaitGroup
+	//var wg sync.WaitGroup
 	// DPrintln(0, "[startAppendLog] star currentTerm:", rf.currentTerm, "me:", rf.me)
 
 	handlerAppendLogReply := func(ok bool, index int, args *AppendLogEntriesReq, reply *AppendLogEntriesRsp, oldNextIndex int) (continueflag bool) {
@@ -638,14 +638,14 @@ func (rf *Raft) startAppendLog() {
 		if i == rf.me {
 			continue
 		}
-		wg.Add(1)
+		//wg.Add(1)
 		go func(index int) {
 			begin := time.Now()
 			// defer func() {
 			// 	waste := time.Since(begin)
 			// 	DPrintln(4, "[startAppendLog] star currentTerm:", rf.currentTerm, "me:", rf.me, "-->", index, "waste:", waste)
 			// }()
-			wg.Done()
+			//wg.Done()
 			count := 0
 			for {
 				count++
@@ -690,7 +690,7 @@ func (rf *Raft) startAppendLog() {
 
 		}(i)
 	}
-	wg.Wait()
+	//wg.Wait()
 }
 
 //变成候选者
