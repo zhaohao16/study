@@ -773,7 +773,7 @@ func (rf *Raft) startElection() {
 func (rf *Raft) DoSnapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.lastIncludedIndex+10 >= index { //减小日志压缩请求
+	if rf.lastIncludedIndex >= index { //减小日志压缩请求
 		return
 	}
 	DPrintln(3, "[DoSnapshot]  star beFollower: me", rf.me, "index:", index, "lastIndex:", rf.getIndex(index), "Term:", rf.currentTerm, "lastIncludedIndex:", rf.lastIncludedIndex, "LastIncludedTerm", rf.lastIncludedTerm, "logs:", rf.logs)
@@ -817,9 +817,12 @@ func (rf *Raft) InstallSnapshot(args SnapshotReq, reply *SnapshotRsp) {
 		rf.logs = make([]logInfo, 1)
 		rf.logs[0].Term = args.LastIncludedTerm //将lastIncludedIndex保存到0位置，方便计较
 		rf.logs[0].Index = args.LastIncludedIndex
-		rf.lastApplied = rf.lastIncludedIndex
-		rf.commitIndex = rf.lastIncludedIndex
+		rf.lastApplied = max(rf.lastIncludedIndex, rf.lastApplied)
+		rf.commitIndex = max(rf.lastIncludedIndex, rf.commitIndex)
 		rf.persister.SaveStateAndSnapshot(rf.encodeRaftState(), args.Snapshot)
+		if rf.lastApplied > rf.lastIncludedIndex {
+			return
+		}
 		rf.applyCh <- ApplyMsg{
 			CommandValid: false,
 			Snapshot:     args.Snapshot,
