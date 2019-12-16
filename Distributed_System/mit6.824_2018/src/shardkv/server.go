@@ -35,7 +35,7 @@ type Op struct {
 	Op      string
 	ID      int64
 	Seq     int64
-	ShardID []int
+	ShardID int
 	Version int
 	Result  string
 	Err     Err //string
@@ -57,6 +57,11 @@ type Migration struct {
 	Data    map[string]string
 	LastSeq map[int64]int64
 }
+
+// type Clean struct {
+// 	Version int
+// 	ShardID int
+// }
 
 type ShardKV struct {
 	mu           sync.Mutex
@@ -401,6 +406,89 @@ func (kv *ShardKV) writeSnapshot(index int) {
 	go kv.rf.DoSnapshot(index, w.Bytes())
 }
 
+func showSnapshot(snapshot []byte) {
+	var remote, id int
+	var newShards [shardmaster.NShards]bool
+	data := make(map[string]string)
+	lastSeq := make(map[int64]int64)
+	shareData := make(map[int]Shards)
+	syncData := make(map[int]int)
+	config := shardmaster.Config{}
+	Shards := newShards
+
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	d.Decode(&data)
+	d.Decode(&lastSeq)
+	d.Decode(&shareData)
+	d.Decode(&syncData)
+	d.Decode(&config)
+	d.Decode(&Shards)
+	d.Decode(&remote)
+	d.Decode(&id)
+	DPrintln(2222, "[showSnapshot] data :")
+	for k, v := range data {
+		DPrintln(2222, "[showSnapshot] data:", key2shard(k), len(v), v)
+	}
+	DPrintln(2222, "[showSnapshot] lastSeq :", lastSeq)
+	DPrintln(2222, "[showSnapshot] shareData :", shareData)
+	DPrintln(2222, "[showSnapshot] syncData :", syncData)
+	DPrintln(2222, "[showSnapshot] config :", config)
+	var shards []int
+	for i := 0; i < shardmaster.NShards; i++ {
+		if Shards[i] {
+			shards = append(shards, i)
+		}
+	}
+	DPrintln(2222, "[showSnapshot] Shards :", shards, Shards)
+	DPrintln(2222, "[showSnapshot] remote :", remote)
+	DPrintln(2222, "[showSnapshot] id :", id)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	lastsize := len(w.Bytes())
+	e.Encode(data)
+
+	DPrintln(2222, "[showSnapshot] data_size:", len(w.Bytes())-lastsize)
+	lastsize = len(w.Bytes())
+
+	e.Encode(lastSeq)
+
+	DPrintln(2222, "[showSnapshot] lastSeq_size:", len(w.Bytes())-lastsize)
+	lastsize = len(w.Bytes())
+
+	e.Encode(shareData)
+
+	DPrintln(2222, "[showSnapshot] shareData_size:", len(w.Bytes())-lastsize)
+	lastsize = len(w.Bytes())
+
+	e.Encode(syncData)
+
+	DPrintln(2222, "[showSnapshot] syncData_size:", len(w.Bytes())-lastsize)
+	lastsize = len(w.Bytes())
+
+	e.Encode(config)
+
+	DPrintln(2222, "[showSnapshot] config_size:", len(w.Bytes())-lastsize)
+	lastsize = len(w.Bytes())
+
+	e.Encode(Shards)
+
+	DPrintln(2222, "[showSnapshot] Shards_size:", len(w.Bytes())-lastsize)
+	lastsize = len(w.Bytes())
+
+	e.Encode(remote)
+
+	DPrintln(2222, "[showSnapshot] remote_size:", len(w.Bytes())-lastsize)
+	lastsize = len(w.Bytes())
+
+	e.Encode(id)
+
+	DPrintln(2222, "[showSnapshot] id_size:", len(w.Bytes())-lastsize)
+
+	DPrintln(2222, "[showSnapshot] len(snapshot):", len(snapshot), "len(w.Bytes()):", len(w.Bytes()))
+}
+
 func (kv *ShardKV) readSnapshot(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -469,8 +557,8 @@ func (kv *ShardKV) loop() {
 			} else if v, ok := (m.Command).(Op); ok {
 				kv.mu.Lock()
 				// DPrintln(2, "[loop] Op begin me:", kv.me, "gid:", kv.gid, "op:", v.String(), "data:", kv.data, "config:", kv.config, "kv.checkKey(v.Key):", kv.checkKey(v.Key))
-				if v.Op == "CheckClean" {
-					//kv.handleClean(&v)
+				if v.Op == "Clean" {
+					kv.handleClean(&v)
 				} else {
 					if !kv.checkKey(v.Key) {
 						v.Err = ErrWrongGroup
@@ -563,6 +651,10 @@ func (kv *ShardKV) cleanShareData() {
 		defer func() {
 			queene <- new(interface{})
 		}()
+		_, isleader := kv.rf.GetState()
+		if !isleader {
+			return
+		}
 		shareData := make(map[int]int) // ShardID-->version
 		kv.mu.Lock()
 		for shardID, shardsInfo := range kv.shareData {
@@ -575,16 +667,25 @@ func (kv *ShardKV) cleanShareData() {
 		DPrintln(2, "[cleanShareData] 11111111111111, me:", kv.me, "gid:", kv.gid, "shareData:", shareData)
 		handleReply := func(shardID int, version int) {
 			kv.mu.Lock()
-			defer kv.mu.Unlock()
 			shardsInfo, ok := kv.shareData[shardID]
-			if ok && shardsInfo.Version == version {
-				delete(kv.shareData, shardID)
-				DPrintln(2, "[cleanShareData] 2222222222222222, me:", kv.me, "gid:", kv.gid, "shardID:", shardID, "version:", version)
-			}
-			if len(kv.shareData) == 0 {
-				DPrintln(222, "[cleanShareData] 3333333333, me:", kv.me, "gid:", kv.gid, "version:", kv.config.Num)
 
+			if ok && shardsInfo.Version == version {
+				kv.mu.Unlock()
+				op := Op{
+					Op:      "Clean",
+					Version: version,
+					ShardID: shardID,
+				}
+				kv.rf.Start(op)
+				// delete(kv.shareData, shardID)
+				// DPrintln(2, "[cleanShareData] 2222222222222222, me:", kv.me, "gid:", kv.gid, "shardID:", shardID, "version:", version)
+			} else {
+				kv.mu.Unlock()
 			}
+			// if len(kv.shareData) == 0 {
+			// 	DPrintln(222, "[cleanShareData] 3333333333, me:", kv.me, "gid:", kv.gid, "version:", kv.config.Num)
+
+			// }
 		}
 		var wg sync.WaitGroup
 		for shardID, version := range shareData {
@@ -743,9 +844,12 @@ func (kv *ShardKV) startMigration() {
 	}
 }
 
-// func (kv *ShardKV) handleClean(op *Op) {
-
-// }
+func (kv *ShardKV) handleClean(op *Op) {
+	shardsInfo, ok := kv.shareData[op.ShardID]
+	if ok && shardsInfo.Version == op.Version {
+		delete(kv.shareData, op.ShardID)
+	}
+}
 
 func (kv *ShardKV) handleMigration(m Migration) {
 	if m.Version != kv.config.Num-1 || len(kv.syncData) == 0 {

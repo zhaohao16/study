@@ -728,6 +728,8 @@ func TestChallenge1Delete(t *testing.T) {
 		for i := 0; i < cfg.n; i++ {
 			raft := cfg.groups[gi].saved[i].RaftStateSize()
 			snap := len(cfg.groups[gi].saved[i].ReadSnapshot())
+			// fmt.Println("gid:", cfg.groups[gi].servers[i].gid, "i", "me:", cfg.groups[gi].servers[i].me, "raft:", raft, "snap:", snap)
+			// showSnapshot(cfg.groups[gi].saved[i].ReadSnapshot())
 			total += raft + snap
 		}
 	}
